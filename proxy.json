@@ -1,0 +1,273 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "location": {
+            "type": "String"
+        },
+        "namingPrefix": {
+            "type": "String"
+        },
+        "resourceGroupUniqueString": {
+            "type": "String"
+        },
+        "subnetId": {
+            "type": "String"
+        },
+        "storageAccountName": {
+            "type": "String"
+        },
+        "adminUsername": {
+            "type": "String"
+        },
+        "adminPassword": {
+            "type": "SecureString"
+        },
+        "proxyPort": {
+            "type": "String"
+        },
+        "clientIPs": {
+            "type": "String"
+        },
+        "clientIPsProvided": {
+            "type": "Bool"
+        },
+        "proxyDNSLabel": {
+            "type": "String"
+        },
+        "tagsForAll": {
+            "type": "Object"
+        },
+        "_currentTime": {
+            "defaultValue": "[utcNow()]",
+            "type": "String"
+        }
+    },
+    "variables": {
+        "proxyVmName": "[concat('mjsproxy-', parameters('resourceGroupUniqueString'))]",
+        "proxyVmSize": "Standard_B2als_v2",
+        "proxyPublicIPName": "[concat(parameters('namingPrefix'), '-proxy-pub')]",
+        "proxyNicName": "[concat(parameters('namingPrefix'), '-proxy-nic')]",
+        "proxyNsgName": "[concat(parameters('namingPrefix'), '-proxy-nsg')]",
+        "publicIpTimeout": "20",
+        "proxyDownloadUrl": "https://github.com/mathworks/parallel-server-proxy/releases/latest/download/parallelserverproxy-glnxa64.tar.gz",
+        "fileShareName": "shared",
+        "certFilePath": "cluster/cert",
+        "certFileBaseUrl": "[concat('https://', parameters('storageAccountName'), '.file.core.windows.net/', variables('fileShareName'), '/', variables('certFilePath'))]",
+        "certSasExpiry": "[dateTimeAdd(parameters('_currentTime'), 'PT30M')]",
+        "certSasParameters": {
+            "canonicalizedResource": "[concat('/file/', parameters('storageAccountName'), '/', variables('fileShareName'), '/', variables('certFilePath'))]",
+            "signedResource": "f",
+            "signedProtocol": "https",
+            "signedPermission": "r",
+            "signedExpiry": "[variables('certSasExpiry')]"
+        },
+        "proxyAllowClientIPSecurityRules": [
+            {
+                "name": "allow-socks5-inbound",
+                "properties": {
+                    "priority": 1000,
+                    "sourceAddressPrefixes": "[split(parameters('clientIPs'), ',')]",
+                    "protocol": "Tcp",
+                    "destinationPortRange": "[parameters('proxyPort')]",
+                    "access": "Allow",
+                    "direction": "Inbound",
+                    "sourcePortRange": "*",
+                    "destinationAddressPrefix": "*"
+                }
+            },
+            {
+                "name": "allow-ssh-inbound",
+                "properties": {
+                    "priority": 1010,
+                    "sourceAddressPrefixes": "[split(parameters('clientIPs'), ',')]",
+                    "protocol": "Tcp",
+                    "destinationPortRange": "22",
+                    "access": "Allow",
+                    "direction": "Inbound",
+                    "sourcePortRange": "*",
+                    "destinationAddressPrefix": "*"
+                }
+            }
+        ],
+        "proxyNsgRules": "[if(parameters('clientIPsProvided'), variables('proxyAllowClientIPSecurityRules'), createArray())]",
+        "proxyStartupScript": [
+            "#!/usr/bin/env bash",
+            "# Copyright 2026 The MathWorks, Inc.",
+            "",
+            "# Redirect all output to a log file",
+            "mkdir -p /var/log/mathworks",
+            "exec > >(tee -a /var/log/mathworks/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1",
+            "PS4='+ [\\d \\t] '",
+            "set -x",
+            "",
+            "[concat('PROXY_PORT=\"', parameters('proxyPort'), '\"')]",
+            "[concat('PROXY_URL=\"', variables('proxyDownloadUrl'), '\"')]",
+            "CERT_SAS_URL=\"__CERT_SAS_URL__\"",
+            "CERT_FILE=\"/opt/mjs/cert\"",
+            "PROXY_DIR=\"/opt/parallelserverproxy\"",
+            "LOG_FILE=\"/var/log/parallelserverproxy.log\"",
+            "",
+            "mkdir -p /opt/mjs \"$PROXY_DIR\"",
+            "",
+            "# Download and extract proxy binary",
+            "curl -fsSL \"$PROXY_URL\" | tar -xz -C \"$PROXY_DIR\"",
+            "PROXY_BIN=$(find \"$PROXY_DIR\" -type f -name 'parallelserverproxy*' | head -1)",
+            "chmod +x \"$PROXY_BIN\"",
+            "",
+            "# Download cert via short-lived SAS URL (no managed identity needed)",
+            "curl -fsSL -H 'x-ms-version: 2024-11-04' \"$CERT_SAS_URL\" -o \"$CERT_FILE\"",
+            "chmod 600 \"$CERT_FILE\"",
+            "",
+            "cat > /etc/systemd/system/parallelserverproxy.service <<EOF",
+            "[[Unit]",
+            "Description=MATLAB Parallel Server SOCKS5 Proxy",
+            "After=network.target",
+            "",
+            "[[Service]",
+            "ExecStart=$PROXY_BIN -certificate $CERT_FILE -port $PROXY_PORT",
+            "Restart=always",
+            "RestartSec=5",
+            "StandardOutput=append:$LOG_FILE",
+            "StandardError=append:$LOG_FILE",
+            "",
+            "[[Install]",
+            "WantedBy=multi-user.target",
+            "EOF",
+            "",
+            "systemctl enable --now parallelserverproxy"
+        ]
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Network/publicIPAddresses",
+            "apiVersion": "2025-05-01",
+            "name": "[variables('proxyPublicIPName')]",
+            "location": "[parameters('location')]",
+            "tags": "[parameters('tagsForAll')]",
+            "sku": {
+                "name": "Standard"
+            },
+            "properties": {
+                "publicIPAllocationMethod": "Static",
+                "dnsSettings": {
+                    "domainNameLabel": "[parameters('proxyDNSLabel')]"
+                },
+                "idleTimeoutInMinutes": "[variables('publicIpTimeout')]"
+            }
+        },
+        {
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "apiVersion": "2025-05-01",
+            "name": "[variables('proxyNsgName')]",
+            "location": "[parameters('location')]",
+            "tags": "[parameters('tagsForAll')]",
+            "properties": {
+                "securityRules": "[variables('proxyNsgRules')]"
+            }
+        },
+        {
+            "type": "Microsoft.Network/networkInterfaces",
+            "apiVersion": "2025-05-01",
+            "name": "[variables('proxyNicName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', variables('proxyPublicIPName'))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', variables('proxyNsgName'))]"
+            ],
+            "tags": "[parameters('tagsForAll')]",
+            "properties": {
+                "enableAcceleratedNetworking": true,
+                "ipConfigurations": [
+                    {
+                        "name": "[concat(variables('proxyVmName'), '-ipconfig')]",
+                        "properties": {
+                            "subnet": {
+                                "id": "[parameters('subnetId')]"
+                            },
+                            "privateIPAllocationMethod": "Dynamic",
+                            "publicIpAddress": {
+                                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('proxyPublicIPName'))]"
+                            }
+                        }
+                    }
+                ],
+                "networkSecurityGroup": {
+                    "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('proxyNsgName'))]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Compute/virtualMachines",
+            "apiVersion": "2025-04-01",
+            "name": "[variables('proxyVmName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('proxyNicName'))]"
+            ],
+            "tags": "[parameters('tagsForAll')]",
+            "properties": {
+                "hardwareProfile": {
+                    "vmSize": "[variables('proxyVmSize')]"
+                },
+                "osProfile": {
+                    "computerName": "[variables('proxyVmName')]",
+                    "adminUsername": "[parameters('adminUsername')]",
+                    "adminPassword": "[parameters('adminPassword')]",
+                    "linuxConfiguration": {
+                        "disablePasswordAuthentication": false,
+                        "provisionVMAgent": true
+                    }
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "Canonical",
+                        "offer": "ubuntu-24_04-lts",
+                        "sku": "server",
+                        "version": "latest"
+                    },
+                    "osDisk": {
+                        "createOption": "FromImage",
+                        "managedDisk": {
+                            "storageAccountType": "Standard_LRS"
+                        }
+                    }
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('proxyNicName'))]"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Compute/virtualMachines/extensions",
+            "apiVersion": "2025-04-01",
+            "name": "[concat(variables('proxyVmName'), '/proxyStartup')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('proxyVmName'))]"
+            ],
+            "properties": {
+                "publisher": "Microsoft.Azure.Extensions",
+                "type": "CustomScript",
+                "typeHandlerVersion": "2.1",
+                "autoUpgradeMinorVersion": true,
+                "settings": {
+                    "skipDos2Unix": false
+                },
+                "protectedSettings": {
+                    "script": "[base64(replace(join(variables('proxyStartupScript'), '\n'), '__CERT_SAS_URL__', concat(variables('certFileBaseUrl'), '?', listServiceSas(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2024-01-01', variables('certSasParameters')).serviceSasToken)))]"
+                }
+            }
+        }
+    ],
+    "outputs": {
+        "proxyFQDN": {
+            "type": "String",
+            "value": "[concat(parameters('proxyDNSLabel'), '.', resourceGroup().location, '.cloudapp.azure.com')]"
+        }
+    }
+}
