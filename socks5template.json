@@ -87,7 +87,6 @@
       "signedPermission": "r",
       "signedExpiry": "[variables('sasExpiry')]"
     },
-    "generatedCertSasUrl": "[concat(variables('certFileBaseUrl'), '?', listServiceSas(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2024-01-01', variables('certSasParameters')).serviceSasToken)]",
     "proxyAllowClientIPSecurityRules": [
       {
         "name": "allow-socks5-inbound",
@@ -351,7 +350,7 @@
           "skipDos2Unix": false
         },
         "protectedSettings": {
-          "script": "[base64(replace(replace(join(variables('proxyStartupScript'), '\n'), '__CERT_SAS_URL__', if(empty(parameters('certSasUrl')), variables('generatedCertSasUrl'), parameters('certSasUrl'))), '__PROXY_BINARY_SAS_URL__', concat(variables('proxyBinaryFileBaseUrl'), '?', listServiceSas(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2024-01-01', variables('proxyBinarySasParameters')).serviceSasToken)))]"
+          "script": "[base64(replace(replace(join(variables('proxyStartupScript'), '\n'), '__CERT_SAS_URL__', if(empty(parameters('certSasUrl')), concat(variables('certFileBaseUrl'), '?', listServiceSas(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2024-01-01', variables('certSasParameters')).serviceSasToken), parameters('certSasUrl'))), '__PROXY_BINARY_SAS_URL__', concat(variables('proxyBinaryFileBaseUrl'), '?', listServiceSas(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2024-01-01', variables('proxyBinarySasParameters')).serviceSasToken)))]"
         }
       }
     }
